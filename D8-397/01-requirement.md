@@ -7,6 +7,7 @@ Cần bổ sung feature mới, flow như sau:
 2. Tạo new table → `agent_product_stock` : id, agent_id, product_id, quantity, created_at, updated_at
 3. Table order `referral_order` add field `type` = “agent_purchase” 
 4. Order paid → Add vào `agent_product_stock.quantity`
+5. Khi tạo order, cho phép nhập sale_price cho từng product, total price tính theo sale_price nếu có truyền, không truyền thì tính như cũ
 
 Tại liệu tham khảo
 - docs/domains/referral-order.md
@@ -42,3 +43,22 @@ Hãy Q&A để làm rõ requirement, sau đó viết tech spec, mô tả những
 - Idempotency là điểm rủi ro cao nhất: cộng stock 2 lần = sai tồn kho. Tech spec đề xuất thêm cờ guard `is_stock_imported` trên `referral_order` + upsert atomic.
 - Đơn `agent_purchase` vẫn đi qua payment gateway (thẻ của chính agent) để đạt `paid`; chỉ bỏ bước khách e-sign.
 - Tech spec: [output/tech-spec.md](output/tech-spec.md).
+
+## Cập nhật — pivot sang `resell_type` (sau phase 1)
+
+Field `type`/`agent_purchase` ở Q&A trên đã được thay bằng **`resell_type`** (enum string), theo [phase1/01-requirement.md](phase1/01-requirement.md):
+
+- `sell_via_crm` (default, ≡ `client_order` cũ) · `purchase_to_inventory` (≡ `agent_purchase` cũ) · `sell_from_inventory` (tương lai, FE chưa truyền được).
+- FE chỉ truyền `RESELL_TYPES_SUPPORTED` = {`sell_via_crm`, `purchase_to_inventory`}.
+
+**Phase 1 (ĐÃ XONG, commit `62737109`):** field `resell_type` + index, Input/Resolver/Service/EntityType, default `sell_via_crm`, expose qua Hasura, và **CRM sync** (`resellType` gửi sang CRM khi paid).
+
+**Phase 2 (tech spec mô tả):** bảng `agent_product_stock` + `stock_imported_at` + strip-down flow + cộng kho khi paid.
+
+**Quyết định bổ sung (Q&A vòng 2):**
+1. `purchase_to_inventory` = **strip-down** (bỏ client/shipping/e-sign/commission/trial, force pay-now).
+2. Side-effect khi paid **bỏ**: commission (`OrderCommission` + `ChangeUserAmount`) + trial. **Giữ**: PDF + email biên nhận + pay slip + CRM-noti.
+3. Idempotency: thêm cột guard `stock_imported_at` + upsert atomic.
+4. **BE** cộng `agent_product_stock` (source of truth); CRM chỉ nhận `resellType`.
+
+**Tension cần đồng bộ FE:** curl `CreateOrder` dev hiện vẫn gửi `company`/`shipping_address` — strip-down yêu cầu FE bỏ khi `purchase_to_inventory`.
