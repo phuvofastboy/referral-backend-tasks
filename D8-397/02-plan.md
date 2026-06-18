@@ -8,10 +8,10 @@ Mỗi phase = 1 deliverable cụ thể, tự hoàn thành & verify được. Là
 | Phase | Nội dung | Trạng thái |
 |---|---|---|
 | 1 | Field `resell_type` + CRM sync | ✅ **DONE** |
-| 2 | Cấu trúc DB: bảng `agent_product_stock` + `stock_imported_at` | ☐ TODO (bắt đầu) |
-| 3 | Strip-down flow tạo đơn `purchase_to_inventory` | ☐ TODO |
-| 4 | Paid → cộng `agent_product_stock` (async, idempotent) | ☐ TODO |
-| 5 | API đọc tồn kho agent (Hasura permission) | ☐ TODO |
+| 2 | Cấu trúc DB: bảng `agent_product_stock` + `stock_imported_at` | ✅ **DONE** |
+| 3 | (Optional) Permission `isAgent` cho `purchase_to_inventory` — create flow KHÔNG đổi | ☐ TODO (optional) |
+| 4 | Paid → cộng `agent_product_stock` + skip commission/trial (async, idempotent) | ✅ **DONE** |
+| 5 | API đọc tồn kho agent (Hasura permission) | ✅ **DONE** (làm cùng P2) |
 | 6 | Docs + catalog + smoke test end-to-end | ☐ TODO |
 
 ---
@@ -30,95 +30,66 @@ Mỗi phase = 1 deliverable cụ thể, tự hoàn thành & verify được. Là
 
 ---
 
-## ☐ Phase 2 — Cấu trúc DB: `agent_product_stock` + `stock_imported_at`
+## ✅ Phase 2 — Cấu trúc DB: `agent_product_stock` + `stock_imported_at` (DONE)
 
-**Mục tiêu:** Tạo schema cho kho agent + cờ guard idempotency. Chưa có logic.
+**Đã làm:**
+- `app/src/Entity/Stock/AgentProductStock.php` — id UUID v7, `agent` ManyToOne `User` (onDelete CASCADE, NOT NULL), `productId` string, `quantity` int (default 0), `createdAt`/`updatedAt` Timestampable; unique `(agent_id, product_id)` + **index `idx_agent_product_stock_product_id`**.
+- `app/src/Repository/Stock/AgentProductStockRepository.php` — khai báo (logic `upsertIncrement` để ở P4).
+- `app/src/Entity/ReferralOrder/ReferralOrder.php` — `stockImportedAt` (datetime nullable) + getter/setter + helper `isPurchaseToInventory()`.
+- Migration `Version20260618071118` (CREATE TABLE + 3 index + FK CASCADE) + `Version20260618084930` (ADD `stock_imported_at`) — đã chạy, dọn drift `hdb_catalog`.
+- Hasura: track `agent_product_stock` + select permission (ROLE_USER filter `agent_id`, ROLE_HASURA_CRM) + remote relationship `crm_product` → CRM; metadata export ra yaml.
 
-**Scope:**
-- `app/src/Entity/Stock/AgentProductStock.php` (mới) — id UUID v7, `agent` ManyToOne `User` (onDelete CASCADE, NOT NULL), `productId` string, `quantity` int, `createdAt`/`updatedAt` Timestampable; `#[ORM\UniqueConstraint(name: 'uniq_agent_product_stock_agent_product', columns: ['agent_id','product_id'])]`.
-- `app/src/Repository/Stock/AgentProductStockRepository.php` (mới) — khai báo (logic `upsertIncrement` ở P4).
-- `app/src/Entity/ReferralOrder/ReferralOrder.php` — thêm `stockImportedAt` (datetime nullable) + getter/setter + helper `isPurchaseToInventory()`.
-
-**Steps:**
-1. Viết entity + repository + sửa ReferralOrder.
-2. `php bin/console doctrine:migrations:diff` → dọn drift (`CREATE SCHEMA hdb_catalog`).
-3. Review migration (skill `db-migration-safety`).
-4. `doctrine:migrations:migrate`.
-5. Hasura: track bảng `agent_product_stock` + `hasura:metadata:apply`.
-
-**Done when:**
-- `agent_product_stock` tồn tại với unique `(agent_id, product_id)`; `referral_order.stock_imported_at` tồn tại.
-- `php bin/console doctrine:schema:validate` mapping OK.
-- Bảng được track trên Hasura console.
-
-**Verify:** `psql` kiểm tra table + cột + unique constraint; `cache:clear` không lỗi.
+**Verified:**
+- `\d agent_product_stock`: PK, unique `(agent_id, product_id)`, index `product_id`, FK CASCADE → user. `referral_order.stock_imported_at` tồn tại.
+- `migrations:diff` re-diff sạch (mapping khớp DB).
+- `check-generated-docs.sh` pass (regenerate `docs/erd.md`).
 
 ---
 
-## ☐ Phase 3 — Strip-down flow tạo đơn `purchase_to_inventory`
+## ☐ Phase 3 — (Optional) Permission cho `purchase_to_inventory` — create flow KHÔNG đổi
 
-**Mục tiêu:** Tạo đơn `purchase_to_inventory` bỏ client/shipping/e-sign/commission/trial, force pay-now.
+> **Quyết định (Q&A vòng 3):** đơn `purchase_to_inventory` tạo **y hệt đơn thường** — KHÔNG strip-down. Vẫn client/company, shipping, e-sign, trừ CRM stock, tax/shipping, pay-now tùy chọn. `resell_type` đã lưu ở phase 1. → **Không cần sửa Input/Resolver/Service ở create.**
 
-**Scope:**
-- `GraphQL/ReferralOrder/Mutation/Create/Input.php` — GroupSequence group `onPurchaseToInventory` (kích hoạt khi `resellType === purchase_to_inventory`): chỉ validate `products`; bỏ XOR client/company, shipping, trial. (Tùy chọn) `Assert\Callback` reject nếu gửi kèm company/shipping.
-- `GraphQL/ReferralOrder/Mutation/Create/Resolver.php` — rẽ nhánh: check `isAgent()`, bỏ resolve company/clientInfo/shippingAddress, bỏ createReferral/createTrial, force `isPayNow=true`, **không** tạo `ReferralOrderDocument`.
-- `Service/ReferralOrder/ReferralOrderService.php` — `create()` + `applyCrmProductData()`: khi `isPurchaseToInventory()` → bỏ snapshot commission (`:481-482`), bỏ `updateCrmProductStock()` (không trừ CRM), vẫn lấy insider price.
+**Mục tiêu (chỉ nếu business yêu cầu):** giới hạn chỉ `isAgent()` mới tạo được đơn `purchase_to_inventory`.
 
-**Steps:**
-1. Sửa Input GroupSequence.
-2. Sửa Resolver rẽ nhánh strip-down.
-3. Sửa Service `create`/`applyCrmProductData`.
-4. `cache:clear`.
+**Scope:** `GraphQL/ReferralOrder/Mutation/Create/Resolver.php` — thêm guard: nếu `resellType === purchase_to_inventory && !currentUser->isAgent()` → `GraphQLException`.
 
-**Done when:**
-- Tạo đơn `purchase_to_inventory` với chỉ `products` (không company/shipping) → thành công, `is_pay_now=true`, không có document/commission, CRM stock không đổi.
-- User không phải agent → `Permission denied`.
+**Done when:** user không phải agent tạo `purchase_to_inventory` → bị từ chối (nếu bật rule). Nếu business không cần → **skip phase này**.
 
-**Verify:** smoke test create (token agent phu_vo) — đơn strip-down tạo OK; check DB: order không có document, `creator_commission_amount` null; CRM stock không giảm.
+**Verify:** smoke test create với token non-agent → reject; token agent → OK.
 
 ---
 
-## ☐ Phase 4 — Paid → cộng `agent_product_stock` (async, idempotent)
+## ✅ Phase 4 — Paid → cộng `agent_product_stock` (async, idempotent) (DONE)
 
-**Mục tiêu:** Khi đơn `purchase_to_inventory` paid → cộng kho 1 lần; bỏ commission/trial, giữ CRM-noti/PDF/email.
+**Đã làm:**
+- `Repository/Stock/AgentProductStockRepository::upsertIncrement(Uuid, string, int)` — raw SQL `INSERT ... ON CONFLICT (agent_id, product_id) DO UPDATE SET quantity = quantity + EXCLUDED.quantity` (atomic, id = `Uuid::v7()`).
+- `Message/ReferralOrder/AddAgentProductStockMessage` (mới) — `AsyncMailMessageInterface`, payload `orderId`.
+- `MessageHandler/ReferralOrder/AddAgentProductStockMessageHandler` (mới) — guard `isPurchaseToInventory` + `status===paid` + `stockImportedAt===null`; loop products (bỏ `isShippingProduct`/null) → `upsertIncrement`; set `stockImportedAt` + flush, bọc `wrapInTransaction`.
+- `ReferralOrderPaidSubscriber` — nhánh `resell_type===purchase_to_inventory`: dispatch `AddAgentProductStockMessage` + `return` (bỏ `ChangeUserAmountMessage`); giữ `OrderPaidMessage` (CRM-noti/PDF/email).
+- `TransactionUpdateHandler` — skip tạo `OrderCommission` khi `isPurchaseToInventory()`.
+- `CreateTrialFromReferralOrderMessageHandler` — guard skip trial khi `isPurchaseToInventory()`.
+- Regenerate `docs/async-messages.md` + `docs/erd.md` → `check-generated-docs.sh` pass.
 
-**Scope:**
-- `Repository/Stock/AgentProductStockRepository.php` — `upsertIncrement(Uuid $agentId, string $productId, int $quantity)` raw SQL `INSERT ... ON CONFLICT (agent_id, product_id) DO UPDATE SET quantity = quantity + EXCLUDED.quantity, updated_at = now()`.
-- `app/src/Message/ReferralOrder/AddAgentProductStockMessage.php` (mới) — `AsyncMailMessageInterface`, payload `orderId`.
-- `app/src/MessageHandler/ReferralOrder/AddAgentProductStockMessageHandler.php` (mới) — guard `isPurchaseToInventory` + `stockImportedAt===null` + `status===paid`; loop products (bỏ `isShippingProduct`) → `upsertIncrement`; set `stockImportedAt` + flush (atomic).
-- `EventSubscriber/Hasura/ReferralOrderPaidSubscriber.php` — nhánh `resell_type===purchase_to_inventory`: dispatch `AddAgentProductStockMessage`; **bỏ** `ChangeUserAmountMessage` (commission); **giữ** `referralOrderPaidNoti`/PDF/email.
+**Verified (e2e local, worker restart để load code mới):**
+- Tạo đơn `purchase_to_inventory` (qty 7) → `UPDATE status=paid` → Hasura `ReferralOrderPaid` → subscriber → worker → `agent_product_stock.quantity=7`, `stock_imported_at` set. ✅
+- Re-fire paid (pending_payment→paid) → qty **vẫn 7** (idempotency guard). ✅
+- `order_commission` = 0 cho đơn. ✅
 
-**Steps:**
-1. Implement `upsertIncrement`.
-2. Message + handler.
-3. Sửa subscriber rẽ nhánh (cẩn thận giữ CRM-noti khi bỏ commission).
-4. Đăng ký route message nếu cần; `cache:clear`.
-
-**Done when:**
-- Đơn `purchase_to_inventory` chuyển `paid` → `agent_product_stock.quantity` cộng đúng số lượng; `stock_imported_at` được set.
-- Gửi duplicate event / retry message → quantity **không** cộng lần 2.
-- Không tạo `OrderCommission`/`ChangeUserAmount`; `referralOrderPaidNoti` (CRM) vẫn chạy.
-
-**Verify:** local — set order paid (qua `referral_order_update_status_by_transaction_mutation` hoặc trigger), `messenger:consume`, check `agent_product_stock`; chạy lại message → không đổi.
+> **Lưu ý:** commission-skip ở `TransactionUpdateHandler` chỉ chạy qua đường `TransactionUpdate` message (CRM webhook), không qua psql update — guard đã thêm ở code, cần test thêm khi có luồng transaction thật.
 
 ---
 
-## ☐ Phase 5 — API đọc tồn kho agent (Hasura permission)
+## ✅ Phase 5 — API đọc tồn kho agent (Hasura permission) (DONE — làm cùng P2)
 
-**Mục tiêu:** FE query được tồn kho của chính agent (`agent_product_stock`).
+**Đã làm:**
+- Select permission `agent_product_stock`: ROLE_USER filter `agent_id = X-Hasura-User-Id` (chỉ thấy kho mình); ROLE_HASURA_CRM full.
+- Remote relationship `crm_product` (join `product_id` → CRM remote schema) — bonus, lấy info sản phẩm cùng query.
+- Metadata export ra `app/hasura/metadata/sources/default/tables/public_agent_product_stock.yaml`.
 
-**Scope:**
-- Hasura metadata: select permission cho `agent_product_stock` theo role `ROLE_USER` — filter `agent_id = X-Hasura-User-Id` (agent chỉ thấy kho mình); cân nhắc master agent xem kho agent con.
-- `hasura:metadata:apply`.
+**Verified:** query `agent_product_stock { product_id quantity crm_product { id name code stock unit_price } }` với token phu_vo (ROLE_USER) → trả đúng kho của agent + join CRM product OK. Query/response mẫu: [output/tech-spec-for-fe.md §4.3](output/tech-spec-for-fe.md).
 
-**Steps:**
-1. Thêm select permission (columns: id, agent_id, product_id, quantity, created_at, updated_at; filter theo user).
-2. Apply metadata.
-
-**Done when:**
-- Query `agent_product_stock` với token agent → trả đúng kho của agent đó, không thấy kho người khác.
-
-**Verify:** smoke test query `agent_product_stock` với token phu_vo (sau khi P4 đã cộng kho) → trả đúng row.
+> **Lưu ý:** field join tên `crm_product` (trả mảng). Master agent xem kho agent con — chưa làm (mở rộng nếu cần).
 
 ---
 
@@ -144,7 +115,7 @@ Mỗi phase = 1 deliverable cụ thể, tự hoàn thành & verify được. Là
 
 - **Refund `paid → cancelled`**: trừ ngược `agent_product_stock` — chưa có cơ chế (giống refund CRM stock hiện tại). Mở phase riêng nếu business cần.
 - **`sell_from_inventory`**: bán từ kho agent — chưa hỗ trợ, mới khai báo enum.
-- **FE đồng bộ strip-down**: FE bỏ `company`/`shipping_address` khi `purchase_to_inventory` (phối hợp team FE).
+- **FE**: KHÔNG cần đổi payload create — đơn `purchase_to_inventory` gửi như đơn thường, chỉ thêm `resell_type`.
 
 ## Phụ thuộc / lưu ý xuyên suốt
 

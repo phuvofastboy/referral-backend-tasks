@@ -3,7 +3,7 @@
 **Task:** D8-397
 **Liên quan:** [01-requirement.md](../01-requirement.md) · [phase1/01-requirement.md](../phase1/01-requirement.md) · [docs/domains/referral-order.md](../../../docs/domains/referral-order.md) · [docs/business/referral-order.md](../../../docs/business/referral-order.md)
 
-> **Cập nhật:** dùng field `resell_type` (thay cho `order_type`/`agent_purchase` ở bản nháp đầu). **Phase 1 đã hoàn thành** (xem mục 2). Tài liệu này mô tả phase 2 (kho agent + strip-down flow).
+> **Cập nhật:** dùng field `resell_type` (thay `order_type`/`agent_purchase`). **Phase 1 đã hoàn thành** (xem mục 2). Phase 2 = kho agent + side-effect khi paid. **Create flow KHÔNG strip-down** — đơn `purchase_to_inventory` tạo y hệt đơn thường, chỉ khác khi paid (bỏ commission + trial, cộng kho).
 
 ---
 
@@ -23,18 +23,21 @@ Cho phép **Agent** tự mua sản phẩm để **nhập về kho riêng** của
 
 ### Khác biệt `purchase_to_inventory` so với đơn thường (`sell_via_crm`)
 
+**Quan trọng:** khi **TẠO đơn**, `purchase_to_inventory` xử lý **y hệt đơn thường** — KHÔNG strip-down. Khác biệt **chỉ ở thời điểm `paid`**.
+
 | Khía cạnh | Đơn thường | `purchase_to_inventory` |
 |---|---|---|
-| Người mua | Khách (Company / ClientInfo) | Chính Agent (`created_by`) |
-| Client info / shipping address | Bắt buộc (XOR) | **Bỏ qua** (strip-down) |
-| E-sign document (quote) | Có | **Bỏ** → Pay Now thẳng |
-| Commission (`OrderCommission` + `ChangeUserAmount`) | Có | **Bỏ** |
-| Trial / Referral | Tùy chọn | **Bỏ** |
-| PDF / email biên nhận / pay slip khi paid | Có | **Giữ** (không bỏ) |
-| Trừ stock CRM trung tâm | Có (`Crm/ChangeProductStock`) | **Không** |
-| Side-effect khi paid | PDF, email, commission, trial | **Cộng `agent_product_stock`** + PDF/email |
+| Client info / company / shipping address | Bắt buộc (XOR) | **Như đơn thường** (FE vẫn gửi) |
+| E-sign document (quote) | Có | **Như đơn thường** |
+| Trừ stock CRM trung tâm (`Crm/ChangeProductStock`) | Có | **Như đơn thường** (vẫn trừ) |
+| Tax / shipping fee | Có | **Như đơn thường** (vẫn tính) |
+| Pay Now | Tùy | **Như đơn thường** (không ép) |
+| **Commission** (`OrderCommission` + `ChangeUserAmount`) khi paid | Có | **BỎ** |
+| **Trial / Referral** khi paid | Tùy chọn | **BỎ** |
+| PDF / email / pay slip / CRM-noti khi paid | Có | **Giữ** |
+| Side-effect MỚI khi paid | — | **Cộng `agent_product_stock`** |
 
-> **⚠ Tension cần lưu ý:** curl `CreateOrder` mẫu từ FE dev hiện vẫn truyền `company` + `shipping_address` cho mọi đơn. Theo quyết định strip-down, FE **phải bỏ** các field này khi `resell_type=purchase_to_inventory` (xem [tech-spec-for-fe.md](./tech-spec-for-fe.md)). Cần đồng bộ với FE trước khi bật phase 2.
+> Mô hình này khớp curl `CreateOrder` từ FE dev (vẫn truyền `company` + `shipping_address`). **Không còn tension** — FE không phải đổi payload create.
 
 ---
 
@@ -50,11 +53,11 @@ Cho phép **Agent** tự mua sản phẩm để **nhập về kho riêng** của
 - Hasura remote schema permission SDL (3 role) + metadata applied.
 - **CRM sync**: `referralOrderPaidNoti()` + `Crm/UpdateReferralOrder.graphql` gửi `resellType` (required) sang CRM khi paid; chain `OrderPaidMessage`/`OrderPaidMessageHandler`/`ReferralOrderPaidSubscriber` truyền `resell_type` (fallback `sell_via_crm`).
 
-→ Hiện tại đơn `purchase_to_inventory` được tạo & lưu, đi luồng **bình thường** (chưa strip-down, chưa cộng kho).
+→ Hiện tại đơn `purchase_to_inventory` được tạo & lưu, đi luồng **bình thường** (đúng thiết kế — chỉ còn thiếu side-effect khi paid).
 
 ### ☐ Phase 2 — CÒN LẠI (tài liệu này)
 
-Bảng `agent_product_stock` + guard `stock_imported_at` + strip-down flow + skip commission/trial + cộng kho khi paid.
+Bảng `agent_product_stock` + guard `stock_imported_at` + cộng kho khi paid + skip commission/trial khi paid. **Create flow KHÔNG đổi.**
 
 ---
 
@@ -118,27 +121,15 @@ private ?DateTimeInterface $stockImportedAt = null;
 **`app/src/Repository/Stock/AgentProductStockRepository.php`** (mới)
 - `upsertIncrement(Uuid $agentId, string $productId, int $quantity): void` — raw SQL `INSERT ... ON CONFLICT (agent_id, product_id) DO UPDATE SET quantity = agent_product_stock.quantity + EXCLUDED.quantity, updated_at = now()`. Atomic, tránh race condition giữa 2 message song song.
 
-### 4.3. GraphQL — Create mutation (strip-down)
+### 4.3. GraphQL — Create mutation — **KHÔNG ĐỔI**
 
-**`Input.php`** — thêm GroupSequence group `onPurchaseToInventory` (kích hoạt khi `resellType === purchase_to_inventory`):
-- `products` không rỗng.
-- **Bỏ** validate `newClientInfo`/`company` XOR, `shippingAddress`, `createReferral`/`createTrial`.
-- (Tùy chọn strict) `Assert\Callback` reject nếu gửi kèm `company`/`shipping_address` → để FE biết không cần gửi.
+Create flow xử lý `purchase_to_inventory` y hệt đơn thường (client/company, shipping, e-sign, CRM stock, tax/shipping). `resell_type` đã được lưu ở phase 1. **Không cần sửa Input/Resolver/Service ở create.**
 
-**`Resolver.php`** — khi `resellType === purchase_to_inventory`:
-- Validate `currentUser->isAgent()` → nếu không, throw `GraphQLException`.
-- Bỏ resolve `company`/`clientInfo`/`shippingAddress`.
-- Bỏ `createReferral`/`createTrial`.
-- Force `isPayNow = true`.
-- **Không** tạo `ReferralOrderDocument`.
-- Giữ resolver mỏng, gom rẽ nhánh vào service.
+- **(Open)** Permission: có giới hạn chỉ `isAgent()` mới tạo được `purchase_to_inventory` không? Nếu có → thêm guard nhỏ ở Resolver. Xem mục 8.
 
-### 4.4. Service `ReferralOrderService`
+### 4.4. Service `ReferralOrderService` — **KHÔNG ĐỔI ở create**
 
-**`create()`** (`:114`) — khi `purchase_to_inventory`:
-- Không snapshot `creatorCommissionRate`/`creatorCommissionAmount`.
-- Không gọi `updateCrmProductStock()` (không trừ CRM).
-- `applyCrmProductData()` (`:193`): vẫn lấy insider price + tính total, nhưng **bỏ** nhánh commission (`:481-482`) và **bỏ** giảm stock. Dùng `$order->isPurchaseToInventory()` để rẽ nhánh.
+Commission snapshot (`creatorCommissionAmount`) vẫn tính ở create như thường — vô hại vì side-effect commission bị bỏ ở paid (mục 4.6).
 
 ### 4.5. Async message — cộng kho khi paid
 
@@ -163,9 +154,9 @@ if (($newData['resell_type'] ?? null) === ReferralOrder::RESELL_TYPE_PURCHASE_TO
     // GIỮ: referralOrderPaidNoti (CRM sync resellType) + PDF + email biên nhận
 }
 ```
-- **Skip commission**: không dispatch `ChangeUserAmountMessage`; trong `OrderPaidMessageHandler` không tính commission cho đơn này.
-- **Skip trial**: `CreateTrialFromReferralOrderMessage` xuất phát từ `ClientConfirmOrderTrialSubscriber` (khách confirm) — đơn purchase_to_inventory không có bước này nên tự nhiên không trigger; vẫn double-check.
-- **Giữ** `referralOrderPaidNoti` (đã gửi `resellType` sang CRM — phase 1), PDF, email/pay slip.
+- **Skip commission**: không dispatch `ChangeUserAmountMessage`; trong `OrderPaidMessageHandler` không tạo `OrderCommission` cho đơn này.
+- **Skip trial**: vì create flow không strip nên agent vẫn có thể set `createReferral`/`createTrial` → cần **guard tường minh**: bỏ trial flow (`CreateTrialFromReferralOrderMessage` / `ClientConfirmOrderTrialSubscriber`) khi `resell_type === purchase_to_inventory`.
+- **Giữ** `referralOrderPaidNoti` (gửi `resellType` sang CRM — phase 1), PDF, email/pay slip, và **trừ CRM stock vẫn diễn ra ở create/submit** (không liên quan subscriber).
 
 > **⚠ Lưu ý phối hợp với CRM sync (phase 1):** `OrderPaidMessageHandler` hiện luôn gọi `referralOrderPaidNoti(..., resellType)`. Phải đảm bảo nhánh skip-commission **không** vô tình bỏ luôn `referralOrderPaidNoti`. Tách rõ: CRM-noti + PDF + email = giữ; commission + trial = skip.
 
@@ -187,11 +178,10 @@ sequenceDiagram
     participant HND as AddAgentProductStockMessageHandler
     participant DB as PostgreSQL
 
-    A->>API: referral_order_create_mutation(resell_type=purchase_to_inventory, products, status=sent)
-    API->>API: isAllowedToMakeOrder + isAgent() + validate products
-    Note over API: strip-down: KHÔNG company/shipping/document,<br/>KHÔNG commission/trial, KHÔNG trừ CRM stock,<br/>force isPayNow
-    API->>CRM: Crm/GetProductTax (insider price)
-    API->>DB: persist ReferralOrder(resell_type=purchase_to_inventory, isPayNow=true)
+    A->>API: referral_order_create_mutation(resell_type=purchase_to_inventory, company, shipping, products)
+    API->>API: tạo đơn Y HỆT đơn thường (client/shipping/document/CRM stock/tax)
+    API->>CRM: Crm/GetProductTax + ChangeProductStock (trừ như thường)
+    API->>DB: persist ReferralOrder(resell_type=purchase_to_inventory)
     API-->>A: ReferralOrder { id, total, resell_type }
     A->>CRM: Thanh toán (thẻ agent)
     CRM->>PG: Charge
@@ -199,7 +189,7 @@ sequenceDiagram
     CRM->>API: referral_order_update_status_by_transaction_mutation → paid
     API->>DB: status = paid
     H->>MQ: ReferralOrderPaid (data.new.resell_type=purchase_to_inventory)
-    Note over MQ: skip commission/trial fan-out;<br/>giữ CRM-noti + PDF + email
+    Note over MQ: skip commission + trial;<br/>giữ CRM-noti + PDF + email/pay slip
     MQ->>HND: AddAgentProductStockMessage(orderId)
     HND->>HND: guard isPurchaseToInventory + stock_imported_at==null + status==paid
     loop mỗi ReferralOrderProduct (bỏ shipping)
@@ -217,14 +207,14 @@ sequenceDiagram
 - [ ] `ReferralOrder`: thêm `stockImportedAt` + helper `isPurchaseToInventory()`.
 - [ ] Migration: create table + unique + `stock_imported_at` (diff + dọn drift, review `migration-reviewer`).
 - [ ] Hasura: track `agent_product_stock` + permission.
-- [ ] `Input`: GroupSequence `onPurchaseToInventory` (skip client/shipping/trial).
-- [ ] `Resolver`: rẽ nhánh strip-down (isAgent, force payNow, no document).
-- [ ] `ReferralOrderService::create` + `applyCrmProductData`: skip commission/CRM-stock cho purchase_to_inventory.
-- [ ] `AddAgentProductStockMessage` + handler.
-- [ ] `ReferralOrderPaidSubscriber`: dispatch stock message + skip commission/trial, **giữ** CRM-noti/PDF/email.
-- [ ] Regenerate catalog: `extract_async_messages.py` (message mới).
-- [ ] Đồng bộ FE: bỏ company/shipping khi purchase_to_inventory (xem FE spec).
+- [ ] (Open) Permission `isAgent()` cho `purchase_to_inventory` — nếu business yêu cầu.
+- [ ] `AddAgentProductStockMessage` + handler (upsert + guard idempotency).
+- [ ] `ReferralOrderPaidSubscriber`: dispatch stock message + skip commission + skip trial, **giữ** CRM-noti/PDF/email.
+- [ ] Guard skip trial: `ClientConfirmOrderTrialSubscriber`/`CreateTrialFromReferralOrderMessage` bỏ qua `purchase_to_inventory`.
+- [ ] Regenerate catalog: `extract_async_messages.py` (message mới) + `extract_erd.py` (entity/field mới) → `check-generated-docs.sh` pass.
 - [ ] Cập nhật docs `docs/domains/referral-order.md` + `docs/business/referral-order.md`.
+
+> **Create flow KHÔNG đổi** — không sửa Input/Resolver/Service ở create (trừ permission nếu cần).
 
 ---
 
@@ -235,14 +225,13 @@ sequenceDiagram
 3. **Refund (`paid → cancelled`)** — repo **không** auto-hoàn stock CRM. Đơn purchase_to_inventory bị cancel sau paid **chưa** có cơ chế trừ ngược `agent_product_stock`. → **Ngoài scope**, TODO nếu business cần.
 4. **Shipping product** trong line items — handler bỏ qua `isShippingProduct=true` khi cộng kho.
 5. **Vô tình bỏ CRM-noti** khi skip commission (mục 4.6) — phải tách rõ CRM-noti khỏi commission.
-6. **Tension FE payload** — FE đang gửi company/shipping; cần đổi trước khi bật strip-down (nếu không, Input strict sẽ reject hoặc backend ignore).
+6. **Skip trial khi create flow bình thường** — agent vẫn có thể set `createTrial`; phải guard skip ở paid (mục 4.6), nếu không trial bị tạo nhầm.
 7. **`sell_from_inventory`** — chưa hỗ trợ; `RESELL_TYPES_SUPPORTED` đã chặn FE truyền. Không xử lý logic gì ở phase này.
 
 ---
 
 ## 8. Câu hỏi mở (confirm với business / FE / CRM)
 
-- **FE strip-down**: FE đồng ý bỏ company/shipping/e-sign khi `purchase_to_inventory`? (mục 1 tension).
-- **Email/pay slip cho agent**: quyết định giữ — gửi cho ai (agent)? Nội dung template có cần khác đơn bán khách không?
-- **Refund agent_purchase**: có trừ lại `agent_product_stock` khi `paid → cancelled`? (đề xuất out-of-scope).
+- **Permission**: có giới hạn chỉ `isAgent()` mới tạo `purchase_to_inventory` không? (create flow hiện không check).
+- **Refund**: có trừ lại `agent_product_stock` khi `paid → cancelled`? (đề xuất out-of-scope).
 - **CRM dùng resellType làm gì**: CRM đã nhận `resellType` (phase 1) — xác nhận CRM không tự quản inventory agent (BE là source of truth).

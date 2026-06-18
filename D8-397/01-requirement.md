@@ -55,10 +55,9 @@ Field `type`/`agent_purchase` ở Q&A trên đã được thay bằng **`resell_
 
 **Phase 2 (tech spec mô tả):** bảng `agent_product_stock` + `stock_imported_at` + strip-down flow + cộng kho khi paid.
 
-**Quyết định bổ sung (Q&A vòng 2):**
-1. `purchase_to_inventory` = **strip-down** (bỏ client/shipping/e-sign/commission/trial, force pay-now).
-2. Side-effect khi paid **bỏ**: commission (`OrderCommission` + `ChangeUserAmount`) + trial. **Giữ**: PDF + email biên nhận + pay slip + CRM-noti.
+**Quyết định bổ sung (Q&A vòng 3 — đảo strip-down):**
+1. `purchase_to_inventory` tạo **y hệt đơn thường** — **KHÔNG strip-down**. Vẫn client/company, shipping, e-sign, trừ CRM stock, tax/shipping, pay-now tùy chọn. (Khớp curl dev — FE không phải đổi payload.)
+2. Khác biệt **chỉ khi paid**: **bỏ** commission (`OrderCommission` + `ChangeUserAmount`) + trial; **giữ** PDF + email + pay slip + CRM-noti; **thêm** cộng `agent_product_stock`.
 3. Idempotency: thêm cột guard `stock_imported_at` + upsert atomic.
 4. **BE** cộng `agent_product_stock` (source of truth); CRM chỉ nhận `resellType`.
-
-**Tension cần đồng bộ FE:** curl `CreateOrder` dev hiện vẫn gửi `company`/`shipping_address` — strip-down yêu cầu FE bỏ khi `purchase_to_inventory`.
+5. (Open) Permission: có giới hạn chỉ `isAgent()` tạo được `purchase_to_inventory` không.

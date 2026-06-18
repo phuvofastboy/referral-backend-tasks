@@ -6,7 +6,7 @@
 
 Tài liệu này mô tả **những gì FE cần biết** để triển khai flow Agent tự mua hàng nhập kho: API thay đổi, GraphQL mutation/query, request & response mẫu.
 
-> **Cập nhật:** field là **`resell_type`** (không phải `order_type`). Field `resell_type` đã **live** (phase 1). Phần kho `agent_product_stock` + strip-down là phase 2.
+> **Cập nhật:** field là **`resell_type`** (không phải `order_type`). Field `resell_type` đã **live** (phase 1). Đơn `purchase_to_inventory` tạo **y hệt đơn thường** — KHÔNG strip-down; khác biệt chỉ ở BE khi paid. Phần kho `agent_product_stock` là phase 2.
 
 ---
 
@@ -26,10 +26,11 @@ Không gửi `resell_type` → BE mặc định `sell_via_crm`.
 
 **FE cần làm:**
 1. Tạo đơn agent mua hàng → `referral_order_create_mutation` với **`resell_type: "purchase_to_inventory"`**.
-2. Với đơn `purchase_to_inventory`, **KHÔNG gửi**: `new_client_info`, `company`, `shipping_address`, `services`, `card_type`, `is_self_delivery`. (Strip-down — xem mục 5.)
-3. `is_pay_now` luôn bị BE ép `true` (pay-now thẳng, không có bước khách e-sign). FE không render bước ký document.
-4. Đọc `resell_type` trên response để phân biệt/lọc đơn.
-5. (Tùy nhu cầu) Hiển thị tồn kho agent → query `agent_product_stock` qua Hasura.
+2. **Payload tạo đơn GIỐNG đơn thường** — vẫn gửi `company`/`new_client_info`, `shipping_address`, `is_pay_now`,... như bình thường. **Không** cần bỏ field nào. (Khác với bản nháp trước — KHÔNG strip-down.)
+3. Đọc `resell_type` trên response để phân biệt/lọc đơn.
+4. (Tùy nhu cầu) Hiển thị tồn kho agent → query `agent_product_stock` qua Hasura (sau khi đơn paid).
+
+> Khác biệt của `purchase_to_inventory` nằm ở **phía BE khi đơn paid** (bỏ commission + trial, cộng kho riêng). FE tạo đơn như mọi đơn khác, chỉ set thêm `resell_type`.
 
 > **Không có mutation mới** — tái sử dụng `referral_order_create_mutation`, chỉ thêm field `resell_type`.
 
@@ -50,11 +51,9 @@ Không gửi `resell_type` → BE mặc định `sell_via_crm`.
      ▼                                                               │
 ┌─────────────────────────────────────────────────┐                │
 │              referral-backend (BE)               │                │
-│  • check isAgent()                               │                │
-│  • lấy insider price từ CRM                      │                │
-│  • KHÔNG client/shipping/commission/trial        │                │
-│  • KHÔNG tạo document, KHÔNG trừ CRM stock       │                │
-│  • force is_pay_now = true                        │                │
+│  • tạo đơn Y HỆT đơn thường                       │                │
+│    (client/shipping/document/CRM stock/tax)      │                │
+│  • chỉ lưu thêm resell_type                       │                │
 └────┬─────────────────────────────────────────────┘                │
      │ 2. trả về ReferralOrder { id, total, resell_type, status }    │
      ▼                                                               │
@@ -78,15 +77,15 @@ Không gửi `resell_type` → BE mặc định `sell_via_crm`.
               └───────────────────────────┘
 ```
 
-### Trạng thái đơn (giống đơn thường, nhưng skip e-sign)
+### Trạng thái đơn (y hệt đơn thường)
 
 ```
-draft ──submit──► sent ──(pay-now)──► signed ──► pending_payment ──► paid
-                                                                       │
-                                                          (cộng agent_product_stock)
+draft ──submit──► sent ──► viewed/signed ──► pending_payment ──► paid
+                                                                   │
+                                                      (cộng agent_product_stock)
 ```
 
-FE **không** render màn ký quote/e-sign cho đơn `purchase_to_inventory`.
+Vòng đời đơn `purchase_to_inventory` **giống hệt đơn thường** (có e-sign nếu không pay-now). Chỉ khác: khi `paid`, BE cộng kho riêng + bỏ commission/trial.
 
 ---
 
@@ -97,7 +96,7 @@ FE **không** render màn ký quote/e-sign cho đơn `purchase_to_inventory`.
 | Thay đổi | Chi tiết |
 |---|---|
 | **Input mới** | Field `resell_type: String` — `"sell_via_crm"` \| `"purchase_to_inventory"`. Bỏ trống → default `sell_via_crm`. `sell_from_inventory` bị reject (`Assert\Choice`) |
-| **Hành vi** (purchase_to_inventory) | BE bỏ client/shipping/commission/trial/document, ép `is_pay_now = true`, không trừ CRM stock |
+| **Hành vi** (purchase_to_inventory) | Tạo đơn **y hệt đơn thường** (client/shipping/document/CRM stock/tax). Khác biệt ở phía BE khi `paid`: bỏ commission + trial, cộng `agent_product_stock`. FE **không đổi** payload create |
 | **Quyền** | Chỉ user là **agent** (`isAgent()`) mới tạo được đơn `purchase_to_inventory`, ngược lại lỗi `Permission denied` |
 
 ### 3.2. Output type `referral_order_entity_type`
@@ -160,7 +159,7 @@ mutation CreateAgentPurchaseOrder($input: referral_order_create_mutation_input!)
 }
 ```
 
-> **Không** gửi `new_client_info`, `company`, `shipping_address`, `card_type`, `is_self_delivery`, `services`. `is_pay_now` không cần gửi (BE ép `true`).
+> Ví dụ rút gọn. Thực tế gửi **đầy đủ field như đơn thường** (`company`/`new_client_info`, `shipping_address`, `is_pay_now`, `card_type`,... tùy luồng), chỉ thêm `resell_type`.
 
 **Response mẫu:**
 
@@ -202,36 +201,57 @@ Giống trên nhưng `status: "draft"` (validate lỏng hơn — chỉ check pro
 
 ### 4.3. Đọc tồn kho riêng của Agent (qua Hasura — phase 2)
 
+Query qua Hasura gateway với header `Authorization: Bearer <token>` + `x-hasura-role: ROLE_USER`. Hasura **tự lọc** theo agent đang đăng nhập (`agent_id = X-Hasura-User-Id`) — không cần truyền `agent_id`.
+
+Bảng có **remote relationship `crm_product`** (join `product_id` → CRM) để lấy thông tin sản phẩm trong cùng 1 query:
+
 ```graphql
-query AgentProductStock($agentId: uuid!) {
-  agent_product_stock(
-    where: { agent_id: { _eq: $agentId } }
-    order_by: { updated_at: desc }
-  ) {
-    id
-    agent_id
+query AgentInventory {
+  agent_product_stock(order_by: { updated_at: desc }) {
     product_id
     quantity
-    created_at
     updated_at
+    crm_product {        # remote relationship → CRM remote schema (trả về MẢNG)
+      id
+      name
+      code
+      stock
+      unit_price
+    }
   }
 }
 ```
 
-**Response mẫu:**
+**Response mẫu (thực tế):**
 
 ```json
 {
   "data": {
     "agent_product_stock": [
-      { "id": "...0001", "agent_id": "1f0e616a-8a04-6c62-8f29-63301b77a039", "product_id": "PRD-12345", "quantity": 10, "created_at": "2026-06-17T10:40:00", "updated_at": "2026-06-17T10:40:00" },
-      { "id": "...0002", "agent_id": "1f0e616a-8a04-6c62-8f29-63301b77a039", "product_id": "PRD-67890", "quantity": 5,  "created_at": "2026-06-17T10:40:00", "updated_at": "2026-06-17T10:40:00" }
+      {
+        "product_id": "928ec42a-fbc2-449d-bfc9-38296a4701ab",
+        "quantity": 15,
+        "updated_at": "2026-06-18T08:56:35",
+        "crm_product": [
+          {
+            "id": "928ec42a-fbc2-449d-bfc9-38296a4701ab",
+            "name": "Device: Printer Mount - $15/Each",
+            "code": "[DEVE-PRI-0015]",
+            "stock": 9798,
+            "unit_price": 120
+          }
+        ]
+      }
     ]
   }
 }
 ```
 
-> `quantity` là tồn kho **cộng dồn** qua nhiều đơn `purchase_to_inventory` đã `paid`. Mỗi `(agent_id, product_id)` là 1 dòng duy nhất.
+**Lưu ý cho FE:**
+- Field join tên là **`crm_product`** (không phải `product`).
+- `crm_product` trả về **mảng** (do map qua `where: {id: {_eq}}`) → lấy phần tử `[0]`.
+- `quantity` là tồn kho **cộng dồn** qua nhiều đơn `purchase_to_inventory` đã `paid`. Mỗi `(agent_id, product_id)` là 1 dòng duy nhất.
+- Cột khả dụng cho ROLE_USER: `id, agent_id, product_id, quantity, created_at, updated_at` (+ relationship `crm_product`).
 
 ### 4.4. Lọc danh sách đơn theo loại
 
@@ -246,8 +266,7 @@ Trong `referral_order_list_query`, đọc thêm `resell_type` để phân biệt
 | User không phải agent gọi `resell_type=purchase_to_inventory` | Lỗi `Permission denied` |
 | `resell_type = "sell_from_inventory"` hoặc giá trị lạ | Lỗi validation `"not a valid choice"` (`Assert\Choice`, field `input_obj.resell_type`) |
 | `products` rỗng khi `status=sent` | Lỗi validation |
-| Gửi kèm `company`/`shipping_address` cho `purchase_to_inventory` | **Strip-down**: BE bỏ qua (hoặc reject — chốt khi implement phase 2; FE **không nên** gửi) |
-| `is_pay_now` FE gửi `false` | Bị override `true` |
+| Gửi kèm `company`/`shipping_address` cho `purchase_to_inventory` | **Bình thường** — BE xử lý như đơn thường (FE **nên** gửi như mọi đơn) |
 | Không gửi `resell_type` | Default `sell_via_crm`, đơn chạy như cũ |
 
 **Timing cộng kho:** chạy **bất đồng bộ** (sau `paid`, qua queue). FE không kỳ vọng kho cập nhật ngay tại response mutation thanh toán — poll/refetch query stock sau vài giây, hoặc refresh khi mở màn kho.
@@ -258,8 +277,7 @@ Trong `referral_order_list_query`, đọc thêm `resell_type` để phân biệt
 
 ## 6. Checklist FE
 
-- [ ] Màn tạo đơn: chế độ "Agent mua hàng" → set `resell_type="purchase_to_inventory"`, ẩn field client/shipping/card/self-delivery/services.
-- [ ] Không render bước ký quote/e-sign cho đơn `purchase_to_inventory`.
+- [ ] Màn tạo đơn: chế độ "Agent mua hàng" → set `resell_type="purchase_to_inventory"`. **Giữ nguyên** các field client/shipping/... như đơn thường.
 - [ ] Đọc & hiển thị `resell_type` trong danh sách/chi tiết; thêm filter theo loại đơn.
 - [ ] Màn "Kho của tôi": query `agent_product_stock` qua Hasura, refetch sau thanh toán.
 - [ ] Xử lý error `Permission denied` (user không phải agent) + `not a valid choice`.
@@ -288,7 +306,7 @@ Trong `referral_order_list_query`, đọc thêm `resell_type` để phân biệt
 | `id` | ID | UUID |
 | `internal_id` | Int | số thứ tự nội bộ |
 | `status` | String | trạng thái đơn |
-| `is_pay_now` | Boolean | luôn `true` với purchase_to_inventory |
+| `is_pay_now` | Boolean | như đơn thường (không bị ép) |
 | `total` / `total_after_tax` / `total_tax` | Float | tổng tiền |
 | `referral_order_products` | `[referral_order_product_entity_type]` | line items |
 
