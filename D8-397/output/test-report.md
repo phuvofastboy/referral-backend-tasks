@@ -37,7 +37,7 @@ TOKEN="${HEADER}.${PAYLOAD}.sig"
 | TC-05 | Cấu trúc bảng `agent_product_stock` | 2 | ✅ PASS |
 | TC-06 | Cột `referral_order.stock_imported_at` | 2 | ✅ PASS |
 | TC-07 | Mapping Doctrine khớp DB (re-diff sạch) | 2 | ✅ PASS |
-| TC-08 | `upsertIncrement` cộng dồn atomic | 4 | ✅ PASS |
+| TC-08 | Batch upsert `upsertIncrementBatch` cộng dồn atomic | 4 | ✅ PASS |
 | TC-09 | Handler đăng ký đúng (debug:messenger) | 4 | ✅ PASS |
 | TC-10 | E2E: paid → cộng `agent_product_stock` | 4 | ✅ PASS |
 | TC-11 | Idempotency: re-fire paid → không cộng 2 lần | 4 | ✅ PASS |
@@ -45,8 +45,11 @@ TOKEN="${HEADER}.${PAYLOAD}.sig"
 | TC-13 | Read tồn kho qua Hasura + join `crm_product` | 5 | ✅ PASS |
 | TC-14 | Permission ROLE_USER chỉ thấy kho mình | 5 | ✅ PASS |
 | TC-15 | CI doc-sync `check-generated-docs.sh` | - | ✅ PASS |
+| TC-16 | Batch gộp trùng `product_id` trong cùng đơn | 4 | ✅ PASS |
 
-**15/15 PASS.** Lưu ý hạn chế ở mục [Chưa cover](#chưa-cover--rủi-ro-còn-lại).
+**16/16 PASS.** Lưu ý hạn chế ở mục [Chưa cover](#chưa-cover--rủi-ro-còn-lại).
+
+> **Cập nhật kiến trúc Phase 4:** logic cộng kho đã refactor sang **batch** — gộp quantity theo `product_id` rồi 1 statement `INSERT … ON CONFLICT` (`AgentProductStockRepository::upsertIncrementBatch`), orchestration trong service reuse `App\Service\Stock\AgentProductStockService::increaseFromOrder()`. Handler chỉ guard + gọi service. TC-08/10/11 re-verify sau refactor.
 
 ---
 
@@ -99,16 +102,13 @@ TOKEN="${HEADER}.${PAYLOAD}.sig"
 **Thực tế:** up() rỗng → xóa migration drift. Mapping khớp.
 **Kết quả:** ✅ PASS
 
-### TC-08 — `upsertIncrement` cộng dồn atomic
-**Mục tiêu:** INSERT...ON CONFLICT cộng dồn đúng + 1 dòng duy nhất.
-**Cách test (SQL mô phỏng):**
-```sql
-INSERT INTO agent_product_stock (...) VALUES (..., qty=10) ON CONFLICT (agent_id, product_id) DO UPDATE SET quantity = quantity + EXCLUDED.quantity;  -- lần 1
--- lần 2 cùng (agent, product) qty=5
-```
+### TC-08 — Batch upsert `upsertIncrementBatch` cộng dồn atomic
+**Mục tiêu:** nhiều đơn cùng `(agent_id, product_id)` cộng dồn đúng + 1 dòng duy nhất, qua `INSERT … ON CONFLICT DO UPDATE SET quantity = quantity + EXCLUDED.quantity`.
+**Cách test (SQL mô phỏng cơ chế upsert):** chạy 2 lần INSERT…ON CONFLICT cùng `(agent, product)` qty 10 rồi qty 5.
 **Mong đợi:** quantity = 15, 1 dòng.
 **Thực tế:** `quantity=15`, 1 row.
 **Kết quả:** ✅ PASS
+**Ghi chú:** từ refactor, code dùng `upsertIncrementBatch` (multi-row, `ksort` key giảm deadlock); cơ chế cộng dồn `+= EXCLUDED` không đổi. Đường thật được cover bởi TC-10/TC-16.
 
 ### TC-09 — Handler đăng ký
 **Cách test:** `php bin/console debug:messenger | grep AgentProductStock`.
@@ -126,7 +126,7 @@ INSERT INTO agent_product_stock (...) VALUES (..., qty=10) ON CONFLICT (agent_id
 5. Poll `agent_product_stock`.
 **Mong đợi:** 1 row `product_id=928ec42a..., quantity=7`; `stock_imported_at` được set.
 **Thực tế:** `[t=2s] 928ec42a... | qty=7`; `imported_at=2026-06-18 09:38:06`.
-**Kết quả:** ✅ PASS
+**Kết quả:** ✅ PASS (re-verify sau refactor batch qua TC-16).
 
 ### TC-11 — Idempotency ⭐
 **Mục tiêu:** re-fire paid không cộng kho lần 2.
@@ -172,6 +172,17 @@ query { agent_product_stock(order_by:{updated_at:desc}) {
 **Thực tế:** cả 3 in sync, exit 0. `AddAgentProductStock` xuất hiện trong async-messages catalog.
 **Kết quả:** ✅ PASS
 
+### TC-16 — Batch gộp trùng `product_id` trong cùng đơn ⭐
+**Mục tiêu:** đơn có 2 line item cùng `product_id` → batch upsert gộp đúng, **không** lỗi `ON CONFLICT … cannot affect row a second time`.
+**Cách test:**
+1. Tạo đơn `purchase_to_inventory` 1 line (product 928ec42a, qty 7).
+2. Insert thêm 1 `referral_order_product` trùng `product_id` qty 3 (copy line cũ qua SQL) → đơn có 2 line: 7 + 3.
+3. `DELETE FROM agent_product_stock; UPDATE status='paid'` → worker.
+4. Poll `agent_product_stock`.
+**Mong đợi:** 1 dòng, `quantity = 10` (7+3 gộp trong 1 statement), không lỗi DB.
+**Thực tế:** `[t=2s] qty=10 (rows=1)`. Re-fire paid → vẫn 10 (idempotency).
+**Kết quả:** ✅ PASS
+
 ---
 
 ## Chưa cover / rủi ro còn lại
@@ -183,6 +194,7 @@ query { agent_product_stock(order_by:{updated_at:desc}) {
 5. **Permission `isAgent` khi create** (Phase 3 optional) — hiện create flow không chặn non-agent tạo `purchase_to_inventory`.
 6. **CRM sync `resellType`** (Phase 1) — đã code; chưa có test case quan sát payload gửi sang CRM khi paid (cần luồng paid thật + log CRM).
 7. **Dev/prod** — toàn bộ test ở local (token không ký). Trên dev cần token RS256 thật + deploy metadata (remote schema permission, table tracking).
+8. **Idempotency race (concurrent delivery)** — guard `stock_imported_at` là check-then-set, **chưa** có pessimistic lock. Nếu cùng 1 message bị 2 worker xử lý song song có thể double-count. Hiện dựa vào subscriber guard `oldStatus===paid` + messenger hiếm khi giao song song. Phép cộng `+= EXCLUDED` vẫn race-safe; chỉ idempotency là điểm hở. Chưa test concurrent.
 
 ## Ghi chú công cụ
 - **ECS** không chạy được (lỗi config `ContainerConfigurator` sẵn có trong repo) — không liên quan thay đổi này.
