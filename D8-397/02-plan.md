@@ -28,8 +28,6 @@ Mỗi phase = 1 deliverable cụ thể, tự hoàn thành & verify được. Là
 
 **Verified:** smoke test create (default/explicit/invalid) qua Hasura + Symfony OK; `RESELL_TYPES_SUPPORTED` chặn `sell_from_inventory`.
 
----
-
 ## ✅ Phase 2 — Cấu trúc DB: `agent_product_stock` + `stock_imported_at` (DONE)
 
 **Đã làm:**
