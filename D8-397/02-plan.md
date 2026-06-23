@@ -46,17 +46,21 @@ Mỗi phase = 1 deliverable cụ thể, tự hoàn thành & verify được. Là
 
 ---
 
-## ☐ Phase 3 — (Optional) Permission cho `purchase_to_inventory` — create flow KHÔNG đổi
+## ✅ Phase 3 — Permission resell_type theo user type (DONE)
 
-> **Quyết định (Q&A vòng 3):** đơn `purchase_to_inventory` tạo **y hệt đơn thường** — KHÔNG strip-down. Vẫn client/company, shipping, e-sign, trừ CRM stock, tax/shipping, pay-now tùy chọn. `resell_type` đã lưu ở phase 1. → **Không cần sửa Input/Resolver/Service ở create.**
+> **Quyết định (Q&A):** phân quyền `resell_type` theo **user type**:
+> - **reseller** (`User::TYPE_RESELLER`) → được cả 3 (`sell_via_crm`, `purchase_to_inventory`, `sell_from_inventory`).
+> - **mọi user khác** (agent, master agent = agent+merchant, `type=null`) → **chỉ** `sell_via_crm` (hoặc null → mặc định `sell_via_crm`).
+> - Vi phạm → **reject** `GraphQLException`. Áp dụng ở **create** (update không cần: `resell_type` immutable, Update Input không khai báo field).
 
-**Mục tiêu (chỉ nếu business yêu cầu):** giới hạn chỉ `isAgent()` mới tạo được đơn `purchase_to_inventory`.
+**Đã làm:**
+- `User::isReseller(): bool` (`type === TYPE_RESELLER`).
+- `ReferralOrderService::assertResellTypeAllowedForUser(?string $resellType, User $user)` — null/`sell_via_crm` cho mọi user; còn lại yêu cầu `isReseller()`, nếu không → `GraphQLException`.
+- `Create/Resolver.php` — gọi assert ở đầu `try` (cùng chỗ với các permission check khác).
 
-**Scope:** `GraphQL/ReferralOrder/Mutation/Create/Resolver.php` — thêm guard: nếu `resellType === purchase_to_inventory && !currentUser->isAgent()` → `GraphQLException`.
+**Verify (smoke test):** agent+`sell_via_crm` → OK; agent+`purchase_to_inventory`/`sell_from_inventory` → reject "only allowed for reseller"; reseller+`purchase_to_inventory` → qua gate.
 
-**Done when:** user không phải agent tạo `purchase_to_inventory` → bị từ chối (nếu bật rule). Nếu business không cần → **skip phase này**.
-
-**Verify:** smoke test create với token non-agent → reject; token agent → OK.
+> ✅ **Đã fix bug `getCategory()`:** `Create/Resolver.php` catch `GraphQLException` trước đây re-throw bằng `$exception->getCategory()` (method không tồn tại trên base `TheCodingMachine\...\GraphQLException`) → mọi GraphQLException ném **trong** `try` bị 500. Đổi thành `throw $exception;` (re-throw nguyên bản, giữ message + extensions). In-try exception giờ render sạch HTTP 200.
 
 ---
 
