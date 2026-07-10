@@ -1,6 +1,14 @@
 # Plan — D8-446 / 03: Serial-based reseller inventory records
 
-> **STATUS: DONE** — implement xong, verify: container compile OK, GraphQL SDL build OK (exit 0), `doctrine:schema:validate` OK, EXPLAIN 6 query repo hợp lệ, messenger handler wired. Cần `composer dump-autoload` cho class mới (autoloader authoritative — theo memory `graphqlite-new-resolver-gotchas`).
+> **STATUS: DONE** — implement xong, verify: container compile OK, GraphQL SDL build OK (exit 0), `doctrine:schema:validate` OK, EXPLAIN/execute query repo hợp lệ, messenger handler wired. Cần `composer dump-autoload` cho class mới (autoloader authoritative — theo memory `graphqlite-new-resolver-gotchas`).
+
+## REVISION (sau feedback) — Option A + nested serials
+Thay đổi so với plan gốc ở Part B:
+- **Nested thay vì flat**: serial truyền lồng trong `products[].serials: [{ product_item_id, serial_number? }]` (bỏ list top-level `referral_order_product_serials`, bỏ `product_id` trong serial — suy từ line cha). Lý do: khớp FK data model + xử lý được **duplicate product_id lines** (build không dedup) qua **position-zip** (line non-shipping thứ i ↔ ReferralOrderProduct non-shipping thứ i).
+- **Option A (không reconcile giữ id)**: `ReferralOrder.referralOrderProducts` có `orphanRemoval: true`; `update()` xóa+rebuild toàn bộ ROP mỗi lần → serial FK CASCADE bị xóa theo → serial LUÔN tạo lại từ input mỗi update (không giữ `id`/`created_at`). Upsert-giữ-id chỉ khả thi nếu rework product rebuild in-place (Option B — bỏ, rủi ro cao).
+- **UX consequence**: client PHẢI gửi lại đầy đủ `serials` mỗi lần update, nếu không sẽ mất (do teardown cascade). "null = giữ nguyên" KHÔNG đúng dưới Option A — null/[] đều = không tạo serial cho line đó.
+- Service đổi: `replaceForOrder/validateSerials` → `syncFromProducts/validateProductSerials` (nhận `products[]`, đọc `.serials`).
+- Validate giữ: dup item toàn order, ownership (item.reseller==reseller), item.product_id==line.product_id, count≤quantity, reserved (loại order cancelled/rejected + exclude order hiện tại).
 
 
 > Prereq: task 01 (tables `reseller_inventory_product_item`, `referral_order_product_serial` + entities/repos) đã xong. Task này chỉ code, **không migration mới**.
