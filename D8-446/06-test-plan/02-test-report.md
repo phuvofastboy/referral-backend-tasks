@@ -1,7 +1,7 @@
 # Test Report — D8-446 (Serial reseller inventory)
 
 Thực thi theo [01-test-plan.md](01-test-plan.md) trên môi trường dev local.
-**Kết quả tổng: PASS toàn bộ core (A, B, C, D, E). F skip (task 03 Part B đang comment).**
+**Kết quả tổng: PASS toàn bộ core (A, B, C, D, E, H). F skip (task 03 Part B đang comment).**
 
 | Ngày | Môi trường | Data mẫu |
 |---|---|---|
@@ -60,16 +60,41 @@ Thực thi theo [01-test-plan.md](01-test-plan.md) trên môi trường dev loca
 
 ---
 
+## H. Hasura list 2 bảng — ✅ PASS
+
+2 bảng đã track trong Hasura metadata (`public_reseller_inventory_product_item.yaml`, `public_referral_order_product_serial.yaml`), permissions ROLE_HASURA_CRM (no filter) + ROLE_USER (filter reseller/creator). List qua `http://localhost:8080/v1/graphql`.
+
+Data test: OrderDelivered tạo 2 item (issue `aaba9515-...`) + 1 `referral_order_product_serial` insert thủ công (link item `019f596c-...7716` ↔ product line).
+
+| Check | Kết quả |
+|---|---|
+| H1 `reseller_inventory_product_item` list (admin) | ✅ 2 row đủ column (`warehouse_issue_id`, `sell_order_id`…) + relationships lồng đúng: `purchase_order{internal_id:2055,status:paid,resell_type:purchase_to_inventory}`, `reseller{email:lenguyen@gmail.com}`, `referral_order_product_serials[]` |
+| H2 `referral_order_product_serial` list (admin) | ✅ 1 row + `referral_order_product{product_id,quantity:1}` + `reseller_inventory_product_item{serial_number,warehouse_issue_id}` lồng đúng |
+| H3 permission ROLE_USER = reseller | ✅ count **2** |
+| H3 permission ROLE_USER = user khác | ✅ count **0** (filter enforce đúng) |
+| H3 permission ROLE_HASURA_CRM | ✅ count **2** (no filter) |
+
+---
+
 ## F. B4 markSold khi sell paid — ⏭️ SKIP
 
 Phụ thuộc `referral_order_product_serial` (create/update sell_from_inventory đang tạm comment ở task 03 Part B → không sinh serial). Sẽ verify khi bật lại serial flow.
 
 ---
 
-## G. Cleanup — ✅ DONE
+## G. Cleanup — ⚠️ CỐ Ý GIỮ LẠI
 
-- Xóa 2 item `SN-TEST-%` (DELETE 2 → còn 0).
-- Restore `agent_product_stock[888368f0]` về **5** (giá trị trước test).
+Theo yêu cầu, **không cleanup** — giữ data test để tiện kiểm tra thêm:
+- 2 item `SN-TEST-1/2` (issue `aaba9515-...`) trong `reseller_inventory_product_item`.
+- 1 row `referral_order_product_serial` (SN-TEST-1).
+- `agent_product_stock[888368f0]` hiện = **2** (do OrderDelivered recompute, chưa restore).
+
+Dọn sau bằng:
+```bash
+docker compose exec -T postgres psql -U fastboy -d referral -c "DELETE FROM referral_order_product_serial WHERE serial_number LIKE 'SN-TEST-%';"
+docker compose exec -T postgres psql -U fastboy -d referral -c "DELETE FROM reseller_inventory_product_item WHERE serial_number LIKE 'SN-TEST-%';"
+docker compose exec -T postgres psql -U fastboy -d referral -c "UPDATE agent_product_stock SET quantity=5 WHERE agent_id='019de185-20d6-7474-a95b-824fab7850a2' AND product_id='888368f0-c91a-46f6-88db-e8753482830f';"
+```
 
 ---
 

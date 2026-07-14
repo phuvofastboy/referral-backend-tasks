@@ -209,6 +209,38 @@ docker compose exec -T postgres psql -U fastboy -d referral -tAc \
 
 ---
 
+## H. Hasura list 2 bảng (direct PG mapping)
+
+2 bảng được track trong Hasura metadata (`public_reseller_inventory_product_item.yaml`, `public_referral_order_product_serial.yaml`) với `select_permissions` cho `ROLE_HASURA_CRM` (no filter) + `ROLE_USER` (filter theo reseller/creator). List qua **Hasura** (`http://localhost:8080/v1/graphql`), KHÔNG phải `/graphql` (GraphQLite).
+
+> Cần có data: chạy mục B (OrderDelivered) trước; insert 1 `referral_order_product_serial` thủ công để list bảng nối.
+
+### H1. reseller_inventory_product_item (admin, kèm relationships)
+```bash
+ISSUE=<issue đã dùng ở B>
+curl -s -X POST http://localhost:8080/v1/graphql -H 'content-type: application/json' -H 'x-hasura-admin-secret: ilovefastboy' \
+ --data-raw "{\"query\":\"query{reseller_inventory_product_item(where:{warehouse_issue_id:{_eq:\\\"$ISSUE\\\"}}){id product_id serial_number warehouse_issue_id sell_order_id purchase_order{internal_id status resell_type} reseller{email} referral_order_product_serials{id serial_number}}}\"}" | python3 -m json.tool
+# KỲ VỌNG: list item + purchase_order/reseller/referral_order_product_serials lồng đúng.
+```
+
+### H2. referral_order_product_serial (admin, kèm relationships)
+```bash
+ITEM=<item id từ H1>
+curl -s -X POST http://localhost:8080/v1/graphql -H 'content-type: application/json' -H 'x-hasura-admin-secret: ilovefastboy' \
+ --data-raw "{\"query\":\"query{referral_order_product_serial(where:{product_item_id:{_eq:\\\"$ITEM\\\"}}){id serial_number referral_order_product{product_id quantity} reseller_inventory_product_item{serial_number warehouse_issue_id}}}\"}" | python3 -m json.tool
+# KỲ VỌNG: list serial + referral_order_product/reseller_inventory_product_item lồng đúng.
+```
+
+### H3. Permission ROLE_USER / ROLE_HASURA_CRM
+```bash
+# ROLE_USER = reseller → thấy; user khác → 0; CRM → thấy hết
+curl -s ... -H 'x-hasura-role: ROLE_USER' -H "x-hasura-user-id: <reseller_id>" ...   # KỲ VỌNG: có row
+curl -s ... -H 'x-hasura-role: ROLE_USER' -H "x-hasura-user-id: <uuid khác>" ...      # KỲ VỌNG: 0 row
+curl -s ... -H 'x-hasura-role: ROLE_HASURA_CRM' ...                                   # KỲ VỌNG: có row (no filter)
+```
+
+---
+
 ## G. Cleanup (xoá data test)
 ```bash
 docker compose exec -T postgres psql -U fastboy -d referral -c \
