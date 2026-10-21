@@ -197,10 +197,3 @@ Tự set `referrer_id` để đọc data người khác sẽ bị chặn ở t�
 
 ---
 
-## Ghi chú
-
-- Response mục 1 là **ví dụ minh hoạ**: các field refund lấy từ data thật của CRM dev, còn cặp
-  user/refund được ghép để minh hoạ — trên local chưa có user nào trùng referrer nên query thật trả
-  `crm_order_refunds: []`.
-- Đường cũ `crm_order_refund(...)` / `crm_order_refund_by_pk(...)` ở root **vẫn còn hoạt động**, chưa
-  bị gỡ. Không dùng cho tính năng mới.
